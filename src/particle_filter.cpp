@@ -28,39 +28,41 @@ using std::cos;
 
 
 void ParticleFilter::init(double x, double y, double theta, double std[]) {
-  /**
-   * Set the number of particles. Initialize all particles to 
-   * first position (based on estimates of x, y, theta and their uncertainties
-   * from GPS) and all weights to 1. 
-   * TODO: Add random Gaussian noise to each particle.
-   * NOTE: Consult particle_filter.h for more information about this method 
-   * (and others in this file).
-   */
-  num_particles = 1000;
-  std::default_random_engine gen;
-  double std_x, std_y, std_theta;
+    /**
+    * Set the number of particles. Initialize all particles to 
+    * first position (based on estimates of x, y, theta and their uncertainties
+    * from GPS) and all weights to 1. 
+    * TODO: Add random Gaussian noise to each particle.
+    * NOTE: Consult particle_filter.h for more information about this method 
+    * (and others in this file).
+    */
+    num_particles = 1000;
+    std::default_random_engine gen;
+    double std_x, std_y, std_theta;
 
-  std_x = std[0];
-  std_y = std[1];
-  std_theta = std[2];
+    std_x = std[0];
+    std_y = std[1];
+    std_theta = std[2];
 
-  normal_distribution<double> dist_x(x, std_x);
-  normal_distribution<double> dist_y(y, std_y);
-  normal_distribution<double> dist_theta(theta, std_theta);
+    normal_distribution<double> dist_x(x, std_x);
+    normal_distribution<double> dist_y(y, std_y);
+    normal_distribution<double> dist_theta(theta, std_theta);
 
-  for (int i = 0; i < num_particles; i++)
-  {
-    Particle p;
-    p.id = i;
-    p.x = dist_x(gen);
-    p.y = dist_y(gen);
-    p.theta = dist_theta(gen);
-    p.weight = 1;
+    for (int i = 0; i < num_particles; i++)
+    {
+        Particle p;
+        p.id = i;
+        p.x = dist_x(gen);
+        p.y = dist_y(gen);
+        p.theta = dist_theta(gen);
+        p.weight = 1.0/double(num_particles);
 
-    particles.push_back(p);
-  }
+        particles.push_back(p);
+        // Also initialize weights here to ensure same size
+        weights.push_back(1.0/double(num_particles));
+    }
 
-  is_initialized = true;
+    is_initialized = true;
 }
 
 void ParticleFilter::prediction(double delta_t, double std_pos[], 
@@ -122,19 +124,29 @@ void ParticleFilter::dataAssociation(vector<LandmarkObs> predicted,
         double obs_x = observations[idx].x;
         double obs_y = observations[idx].y;
         double d_min = DBL_MAX;
+        int map_id = -1;
         for (int jdx = 0; jdx < predicted.size(); jdx++)
         {
-            int pre_id = predicted[jdx].id;
             double pre_x = predicted[jdx].x;
             double pre_y = predicted[jdx].y;
             //Calculate euclidean distance and overwrite min
-            double d_cur = sqrt((pre_x - obs_x) * (pre_x - obs_x) + (pre_y - obs_y) * (pre_y - obs_y));
+            double d_cur = sqrt(((pre_x - obs_x) * (pre_x - obs_x)) + ((pre_y - obs_y) * (pre_y - obs_y)));
             if (d_cur < d_min)
             {
                 d_min = d_cur;
-                observations[idx].id = pre_id;
+                map_id = predicted[jdx].id;
             }
         }
+
+        observations[idx].id = map_id;
+        /*double dist = sqrt(((predicted[map_id].x - obs_x) * (predicted[map_id].x - obs_x)) +
+                           ((predicted[map_id].y - obs_y) * (predicted[map_id].y - obs_y)));
+        if (d_min > dist + 0.2 || d_min < dist - 0.2)
+        {
+            std::cout << "Minimum found distance: " << d_min << " Calculated Distance: " << dist << "\n";
+            throw std::runtime_error("This distance does not fit");
+        }*/
+
         if (d_min == DBL_MAX)
         {
             // Something went terribly wrong!
@@ -159,7 +171,9 @@ void ParticleFilter::updateWeights(double sensor_range, double std_landmark[],
     *   and the following is a good resource for the actual equation to implement
     *   (look at equation 3.33) http://planning.cs.uiuc.edu/node99.html
     */
-    for (int idx = 0; idx < num_particles; idx++)
+    double total_probability = 0;
+
+    for (int idx = 0; idx < particles.size(); idx++)
     {
         double x_p = particles[idx].x;
         double y_p = particles[idx].y;
@@ -213,58 +227,85 @@ void ParticleFilter::updateWeights(double sensor_range, double std_landmark[],
             double dy_sq = (y_map - y_obs) * (y_map - y_obs);
             double std_x = std_landmark[0], std_y = std_landmark[1];
 
-            double weight = 1/(2 * M_PI * std_x * std_y) * exp(-(dx_sq / (2 * std_x * std_x) + (dy_sq / (2 * std_y * std_y))));
-
+            double weight = 1/(2 * M_PI * std_x * std_y) * exp(-((dx_sq / (2 * std_x * std_x)) + (dy_sq / (2 * std_y * std_y))));
             particles[idx].weight *= weight;
+            total_probability += particles[idx].weight;
         }
+    }
+
+    // Renormalize the weights since all probabilities need to sum up to 1 (and to avoid under/overflow)
+    for (int idx = 0; idx < particles.size(); idx++)
+    {
+        particles[idx].weight /= total_probability;
     }
 }
 
 void ParticleFilter::resample() {
-  /**
-   * TODO: Resample particles with replacement with probability proportional 
-   *   to their weight. 
-   * NOTE: You may find std::discrete_distribution helpful here.
-   *   http://en.cppreference.com/w/cpp/numeric/random/discrete_distribution
-   */
+    /**
+    * TODO: Resample particles with replacement with probability proportional 
+    *   to their weight. 
+    * NOTE: You may find std::discrete_distribution helpful here.
+    *   http://en.cppreference.com/w/cpp/numeric/random/discrete_distribution
+    */
+    // First, get the current array of weights as it is needed here.
+    if (weights.size() != particles.size())
+    {
+        std::cout << "Weights and Particle arrays differ in size... Something is terribly wrong. Cannot reshuffle weights. \n";
+        return;
+    }
 
+    for (int idx = 0; idx < weights.size(); idx++)
+    {
+        weights[idx] = particles[idx].weight;
+    }
+    // Now give array indices according to the weight and reshuffle proportional to the particle weight.
+    std::default_random_engine gen;
+    std::discrete_distribution<> distribution(weights.begin(), weights.end());
+    std::vector<Particle> resampled_particles;
+    for (int idx = 0; idx < particles.size(); idx++)
+    {
+        resampled_particles.push_back(particles[distribution(gen)]);
+    }
+
+    particles = resampled_particles;
+    return;
 }
 
 void ParticleFilter::SetAssociations(Particle& particle, 
                                      const vector<int>& associations, 
                                      const vector<double>& sense_x, 
                                      const vector<double>& sense_y) {
-  // particle: the particle to which assign each listed association, 
-  //   and association's (x,y) world coordinates mapping
-  // associations: The landmark id that goes along with each listed association
-  // sense_x: the associations x mapping already converted to world coordinates
-  // sense_y: the associations y mapping already converted to world coordinates
-  particle.associations= associations;
-  particle.sense_x = sense_x;
-  particle.sense_y = sense_y;
+    // particle: the particle to which assign each listed association, 
+    //   and association's (x,y) world coordinates mapping
+    // associations: The landmark id that goes along with each listed association
+    // sense_x: the associations x mapping already converted to world coordinates
+    // sense_y: the associations y mapping already converted to world coordinates
+    particle.associations= associations;
+    particle.sense_x = sense_x;
+    particle.sense_y = sense_y;
 }
 
 string ParticleFilter::getAssociations(Particle best) {
-  vector<int> v = best.associations;
-  std::stringstream ss;
-  copy(v.begin(), v.end(), std::ostream_iterator<int>(ss, " "));
-  string s = ss.str();
-  s = s.substr(0, s.length()-1);  // get rid of the trailing space
-  return s;
+    vector<int> v = best.associations;
+    std::stringstream ss;
+    copy(v.begin(), v.end(), std::ostream_iterator<int>(ss, " "));
+    string s = ss.str();
+    s = s.substr(0, s.length()-1);  // get rid of the trailing space
+    return s;
 }
 
 string ParticleFilter::getSenseCoord(Particle best, string coord) {
-  vector<double> v;
+    vector<double> v;
 
-  if (coord == "X") {
+    if (coord == "X") {
     v = best.sense_x;
-  } else {
+    } else {
     v = best.sense_y;
-  }
+    }
 
-  std::stringstream ss;
-  copy(v.begin(), v.end(), std::ostream_iterator<float>(ss, " "));
-  string s = ss.str();
-  s = s.substr(0, s.length()-1);  // get rid of the trailing space
-  return s;
+    std::stringstream ss;
+    copy(v.begin(), v.end(), std::ostream_iterator<float>(ss, " "));
+    string s = ss.str();
+    s = s.substr(0, s.length()-1);  // get rid of the trailing space
+    return s;
 }
